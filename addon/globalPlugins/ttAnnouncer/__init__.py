@@ -13,12 +13,14 @@ import speech
 import synthDriverHandler
 import ui
 from .interface import TTAnnouncerSettingsPanel
+from . import patterns
 addonHandler.initTranslation()
 
 CONF_SPEC = {
     "engine": "string(default='')",
     "enabled": "boolean(default=False)",
-    "regexTranslation": "boolean(default=True)"
+    "regexTranslation": "boolean(default=True)",
+    "events": "string_list(default=list('chanmsg'))"
 }
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
@@ -32,11 +34,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         config.conf.spec[self.addonName] = CONF_SPEC
         self.addonConf = config.conf[self.addonName]
         self.enabled = self.addonConf["enabled"]
-        self.suppresable = False
+        self.patterns = patterns.getAllPatterns()
+        self.suppressable = False
         self.origSpeak = speech.speech.speak
         speech.speech.speak = self.localSpeak
         TTAnnouncerSettingsPanel.addonConf = self.addonConf
-        TTAnnouncerSettingsPanel.onSaveCallback = self.reloadSynth
+        TTAnnouncerSettingsPanel.onSaveCallback = self.reloadConfig
         gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(TTAnnouncerSettingsPanel)
         self.processText = WINFUNCTYPE(c_long,c_wchar_p)(self.processText)
         _setDllFuncPointer(localLib, "_nvdaController_speakText", self.processText)
@@ -46,8 +49,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         globalVars.ttAnnouncer = None
 
     def localSpeak(self, sequence, *args, **kwargs):
-        if self.suppresable:
-            self.suppresable = False
+        if self.suppressable:
+            self.suppressable = False
             return
         return self.origSpeak(sequence, *args, **kwargs)
 
@@ -55,22 +58,28 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
         focus=api.getFocusObject()
         if focus.sleepMode==focus.SLEEP_FULL:
             return -1
-        msg = re.match(self.chanMsgRe, text) if self.enabled else None
-        if msg is not None:
-            self.suppresable = True
-            queueHandler.queueFunction(queueHandler.eventQueue, self.synthInstance.speak, f"{msg['userName']} - {msg['text']}")
+        msg = None
+        if self.enabled:
+            for pattern in self.patterns:
+                if pattern["name"] in self.addonConf["events"]:
+                    msg = re.match(pattern["re"], text)
+                    if msg:
+                        break
+            if msg is not None:
+                self.suppressable = True
+                queueHandler.queueFunction(queueHandler.eventQueue, self.synthInstance.speak, [f"{msg['userName']} - {msg['text']}"])
         queueHandler.queueFunction(queueHandler.eventQueue,speech.speakText,text)
         return 0
 
     def initSynth(self):
         if not self.enabled:
             return
-        chanMsg = _("Channel message from") if self.addonConf["regexTranslation"] else "Channel message from"
-        self.chanMsgRe = re.compile(f"^{chanMsg} (?P<userName>.*?)[:.] (?P<text>.*)$", flags=re.DOTALL)
         self.synthInstance = synthDriverHandler._getSynthDriver(self.addonConf["engine"])()
         self.synthInstance.initSettings()
 
-    def reloadSynth(self):
+    def reloadConfig(self, regeneratePatterns = False):
+        if regeneratePatterns:
+            self.patterns = patterns.getAllPatterns()
         self.terminateSynth()
         self.initSynth()
 
